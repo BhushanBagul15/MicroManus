@@ -2,10 +2,11 @@
 
 import { useChat, type Message } from "ai/react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { MODEL_PRICING, type Provider } from "@/lib/pricing";
 import { AgentTraceStep } from "@/components/AgentTraceStep";
 import { PdfCard } from "@/components/PdfCard";
-import { Send, Loader2 } from "lucide-react";
+import { Send, Loader2, AlertTriangle } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 
 interface PersistedMessage {
@@ -41,6 +42,19 @@ function toInitialMessages(rows: PersistedMessage[]): Message[] {
     }));
 }
 
+function parseErrorMessage(msg: string) {
+  try {
+    const parsed = JSON.parse(msg);
+    if (parsed.error?.message) return parsed.error.message;
+    if (parsed.message) return parsed.message;
+    if (typeof parsed.error === "string") return parsed.error;
+  } catch (e) {
+    // not JSON
+  }
+  if (msg.startsWith("Error: ")) return msg.replace("Error: ", "");
+  return msg;
+}
+
 export function ChatClient({
   threadId,
   threadTitle,
@@ -54,15 +68,29 @@ export function ChatClient({
   reports: ReportRow[];
   availableKeys: KeyRow[];
 }) {
+  const router = useRouter();
   const [provider, setProvider] = useState<Provider | null>(availableKeys[0]?.provider ?? null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  const { messages, input, handleInputChange, handleSubmit, isLoading, error } = useChat({
+  const { messages, input, handleInputChange, handleSubmit, isLoading, error, reload } = useChat({
     api: "/api/chat",
     id: threadId,
     initialMessages: toInitialMessages(initialMessages),
     body: { threadId, provider },
   });
+
+  let parsedErrorMsg = "";
+  let isTokenLimit = false;
+  let isRateLimit = false;
+  let isNetworkError = false;
+
+  if (error) {
+    parsedErrorMsg = parseErrorMessage(error.message);
+    const lower = parsedErrorMsg.toLowerCase();
+    isTokenLimit = lower.includes("token limit") || lower.includes("context length") || lower.includes("too many tokens") || lower.includes("maximum context length");
+    isRateLimit = lower.includes("rate limit") || lower.includes("429") || lower.includes("too many requests");
+    isNetworkError = lower === "network error" || lower.includes("failed to fetch");
+  }
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -169,7 +197,44 @@ export function ChatClient({
             <Loader2 className="h-3.5 w-3.5 animate-spin" /> thinking...
           </div>
         )}
-        {error && <p className="text-sm text-destructive">Error: {error.message}</p>}
+        {error && (
+          <div className="flex flex-col gap-3 rounded-xl border border-destructive/20 bg-destructive/10 p-4 text-sm text-destructive max-w-[85%]">
+            <div className="flex items-center gap-2 font-medium">
+              <AlertTriangle className="h-4 w-4" />
+              <span>Something went wrong</span>
+            </div>
+            <div className="opacity-90 leading-relaxed">
+              {isTokenLimit ? (
+                <p>This conversation has reached the model's maximum memory limit. Please start a new chat to continue.</p>
+              ) : isRateLimit ? (
+                <p>You've hit the AI provider's rate limit. Please wait a moment and try again.</p>
+              ) : isNetworkError ? (
+                <p>Network error. The connection was lost, which often happens when the AI provider's strict rate limits are exceeded or their server crashes. Please wait a moment and try again.</p>
+              ) : (
+                <p>{parsedErrorMsg}</p>
+              )}
+            </div>
+            <div className="flex items-center gap-2 mt-2">
+              {isTokenLimit ? (
+                <button
+                  type="button"
+                  onClick={() => router.push("/chat")}
+                  className="px-3 py-1.5 bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors rounded-md text-xs font-medium"
+                >
+                  Start New Chat
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => reload()}
+                  className="px-3 py-1.5 bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors rounded-md text-xs font-medium"
+                >
+                  Retry Message
+                </button>
+              )}
+            </div>
+          </div>
+        )}
         <div ref={bottomRef} />
       </div>
 
